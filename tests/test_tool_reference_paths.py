@@ -408,6 +408,9 @@ def test_tool_base_properties_has_reference_image_paths():
     props = _build_tool_base_properties()
     assert "reference_image_paths" in props
     assert props["reference_image_paths"]["type"] == "array"
+    assert props["reference_message_ids"]["type"] == "array"
+    assert props["reference_message_ids"]["items"] == {"type": "string"}
+    assert props["reference_message_ids"]["maxItems"] == 6
 
 
 # ---------- GeminiImageGenerationTool.call 集成 ----------
@@ -511,5 +514,134 @@ async def test_tool_call_rejects_out_of_whitelist_reference_image_path(tmp_path)
         for_forum=True,
     )
 
+    assert "未启动生成" in result
+    assert plugin.captured_reference_images is None
+
+
+@pytest.mark.asyncio
+async def test_reference_required_without_images_does_not_consume_limit_or_generate(
+    tmp_path,
+):
+    from unittest.mock import AsyncMock
+
+    from tl.llm_tools import GeminiImageGenerationTool
+
+    plugin = _FakePlugin(
+        allowed_dirs=[str(tmp_path)], generated_path=tmp_path / "unused.png"
+    )
+    plugin._check_and_consume_limit = AsyncMock(return_value=(True, None))
+    result = await GeminiImageGenerationTool(plugin=plugin).call(
+        _tool_context(),
+        prompt="Use the old character design",
+        use_reference_images=True,
+        for_forum=True,
+    )
+    assert "未启动生成" in result
+    assert plugin.captured_reference_images is None
+    plugin._check_and_consume_limit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_history_message_ids_are_forwarded_and_actually_used(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from tl.llm_tools import GeminiImageGenerationTool
+
+    generated = _make_img(tmp_path, "generated.png")
+    plugin = _FakePlugin(allowed_dirs=[str(tmp_path)], generated_path=generated)
+    plugin._fetch_images_from_event = AsyncMock(
+        return_value=(["selected-history-image"], [])
+    )
+    result = await GeminiImageGenerationTool(plugin=plugin).call(
+        _tool_context(),
+        prompt="Use the earlier image",
+        reference_message_ids=["101"],
+        for_forum=True,
+    )
     assert "图像生成完成" in result
-    assert plugin.captured_reference_images == []
+    assert plugin.captured_reference_images == ["selected-history-image"]
+    assert plugin._fetch_images_from_event.call_args.kwargs[
+        "reference_message_ids"
+    ] == ["101"]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_history_message_cannot_fall_back_to_text_only(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from tl.llm_tools import GeminiImageGenerationTool
+
+    plugin = _FakePlugin(
+        allowed_dirs=[str(tmp_path)], generated_path=tmp_path / "unused.png"
+    )
+    plugin._fetch_images_from_event = AsyncMock(
+        side_effect=ValueError("reference_message_unavailable")
+    )
+    plugin._check_and_consume_limit = AsyncMock(return_value=(True, None))
+    result = await GeminiImageGenerationTool(plugin=plugin).call(
+        _tool_context(),
+        prompt="Use the old image",
+        reference_message_ids=["101"],
+        for_forum=True,
+    )
+    assert "未启动生成" in result
+    assert plugin.captured_reference_images is None
+    plugin._check_and_consume_limit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_required_reference_is_checked_before_generation(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from tl.llm_tools import _prepare_batch_tasks
+
+    plugin = _FakePlugin(
+        allowed_dirs=[str(tmp_path)], generated_path=tmp_path / "unused.png"
+    )
+    plugin.cfg.batch_max_tasks = 2
+    plugin.cfg.batch_max_images_per_task = 1
+    plugin._check_and_consume_limit = AsyncMock(return_value=(True, None))
+    items, error = await _prepare_batch_tasks(
+        plugin,
+        _tool_context().context.event,
+        [
+            {
+                "name": "edit",
+                "prompt": "Use the earlier image",
+                "provider": "example",
+                "image_count": 1,
+                "use_reference_images": True,
+            }
+        ],
+    )
+
+    assert items is None
+    assert "未启动生成" in error
+    plugin._check_and_consume_limit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_required_reference_does_not_consume_limit(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from tl.llm_tools import execute_image_generation_tool
+
+    monkeypatch.setitem(
+        sys.modules,
+        "astrbot.api.message_components",
+        SimpleNamespace(Image=object),
+    )
+    plugin = _FakePlugin(
+        allowed_dirs=[str(tmp_path)], generated_path=tmp_path / "unused.png"
+    )
+    plugin._check_and_consume_limit = AsyncMock(return_value=(True, None))
+    result = await execute_image_generation_tool(
+        plugin,
+        _tool_context().context.event,
+        "Use the earlier image",
+        use_reference_images="true",
+    )
+
+    assert "未启动生成" in result[0]
+    assert plugin.captured_reference_images is None
+    plugin._check_and_consume_limit.assert_not_awaited()

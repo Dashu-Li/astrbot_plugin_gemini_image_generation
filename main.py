@@ -1902,11 +1902,14 @@ class GeminiImageGenerationPlugin(Star):
         return self.image_handler.filter_valid_reference_images(images, source)
 
     async def _fetch_images_from_event(
-        self, event: AstrMessageEvent, include_at_avatars: bool = False
+        self,
+        event: AstrMessageEvent,
+        include_at_avatars: bool = False,
+        reference_message_ids: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
         """兼容旧 API：从事件中获取图片"""
         return await self.image_handler.fetch_images_from_event(
-            event, include_at_avatars
+            event, include_at_avatars, reference_message_ids=reference_message_ids
         )
 
     async def _generate_image_core_internal(

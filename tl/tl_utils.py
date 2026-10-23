@@ -653,7 +653,10 @@ async def collect_image_sources(event, log_debug=logger.debug) -> list[str]:
 
                 # 文件组件（尝试按图片处理）
                 if comp.__class__.__name__ == "File":
-                    file_val = getattr(comp, "file", None) or getattr(comp, "url", None)
+                    # Metadata collection must not invoke File.file's sync download.
+                    file_val = getattr(comp, "url", None) or getattr(
+                        comp, "file_", None
+                    )
                     add_source(file_val, origin)
                     continue
 

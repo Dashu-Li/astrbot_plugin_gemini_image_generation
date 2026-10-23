@@ -186,6 +186,18 @@ def _build_tool_base_properties() -> dict[str, Any]:
             ),
             "default": [],
         },
+        "reference_message_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 6,
+            "description": (
+                "单图任务可选：从当前QQ群或私聊的历史消息取参考图，传入真实消息ID。"
+                "先从上下文或 search_qq_chat_history 找到目标图片消息ID，不得编造。"
+                "工具通过 get_msg 读取并核对同会话来源；指定后只采用这些消息的图片，最多6张。"
+                "不是用户QQ号、群号、图片文件名或图像描述；无法取得图片时停止生成。"
+            ),
+            "default": [],
+        },
     }
 
 
@@ -225,6 +237,10 @@ def _build_tool_description(plugin: Any) -> str:
         "然后在发帖或回复时使用 Markdown 格式 ![描述](URL) 插入图片。"
         "【本地路径参考图】如需基于上一轮工具产出的本地图片改图（如 data/temp/tool_images/ 下缓存图），"
         "用 reference_image_paths 传路径；默认仅允许插件配置的允许目录内文件，禁止 .. 穿越。"
+        "【聊天记录参考图】use_reference_images=true 本身只取本条及引用消息，不会自动搜索历史。"
+        "历史图片若上下文有真实缓存路径（Image Ref/附件路径），用 reference_image_paths；"
+        "否则先用 search_qq_chat_history 找到图片消息ID，单图任务传 reference_message_ids 读取原图。"
+        "只有图片描述不能当作已经提供参考图；取不到时请用户引用或重发，不得改为纯文字画图。"
     )
 
 
@@ -1068,6 +1084,15 @@ async def _prepare_batch_tasks(
             _normalize_reference_paths(plugin, raw_item.get("reference_image_paths"))
         )
         has_references = bool(reference_images or avatar_reference)
+        if (
+            raw_item.get("use_reference_images")
+            or raw_item.get("include_user_avatar")
+            or raw_item.get("reference_image_paths")
+        ) and not has_references:
+            return (
+                None,
+                f"批量任务 {name} 未取得所需参考图片，未启动生成；请提供有效图片或缓存路径。",
+            )
         preserve_size = (
             bool(raw_item.get("preserve_reference_image_size"))
             if "preserve_reference_image_size" in raw_item
@@ -1240,7 +1265,8 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
 
         # 布尔参数已在工具定义中声明为 boolean 类型，直接使用
         include_avatar = bool(include_user_avatar)
-        include_ref_images = bool(use_reference_images)
+        message_ids = kwargs.get("reference_message_ids")
+        include_ref_images = bool(use_reference_images or message_ids)
         resolution, aspect_ratio, config_value_notice = _resolve_tool_size_params(
             plugin,
             size=size,
@@ -1251,9 +1277,21 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         )
 
         # 获取参考图片（需要在启动后台任务前获取，因为 event 可能在之后失效）
-        reference_images, avatar_reference = await plugin._fetch_images_from_event(
-            event, include_at_avatars=include_avatar
-        )
+        try:
+            if include_ref_images or include_avatar:
+                fetch_kwargs = {"include_at_avatars": include_avatar}
+                if message_ids:
+                    fetch_kwargs["reference_message_ids"] = message_ids
+                (
+                    reference_images,
+                    avatar_reference,
+                ) = await plugin._fetch_images_from_event(event, **fetch_kwargs)
+            else:
+                reference_images, avatar_reference = [], []
+        except ValueError as exc:
+            if str(exc) != "reference_message_unavailable":
+                raise
+            return "❌ 未能取得指定历史消息中的同会话参考图，未启动生成。请核对真实图片消息ID，或引用/重发图片；不能仅凭描述当作已提供参考图。"
 
         if not include_ref_images:
             reference_images = []
@@ -1268,6 +1306,10 @@ class GeminiImageGenerationTool(FunctionTool[AstrAgentContext]):
         ref_count = len(reference_images)
         avatar_count = len(avatar_reference)
         has_references = bool(ref_count or avatar_count)
+        if (
+            include_ref_images or include_avatar or kwargs.get("reference_image_paths")
+        ) and not has_references:
+            return "❌ 未取得所需参考图片，未启动生成。历史图片请传真实的 reference_image_paths 或 reference_message_ids，或让用户引用/重发图片；不要用文字描述代替参考图。"
         preserve_size = (
             bool(kwargs.get("preserve_reference_image_size"))
             if "preserve_reference_image_size" in kwargs
@@ -1613,6 +1655,11 @@ async def execute_image_generation_tool(
         reference_images = []
     if not include_avatar:
         avatar_reference = []
+
+    if (include_ref_images or include_avatar) and not (
+        reference_images or avatar_reference
+    ):
+        return ["❌ 未取得所需参考图片，未启动生成；请引用或重发图片。"]
 
     logger.info(
         f"[工具调用] 收集到参考图：消息 {len(reference_images)} 张，"

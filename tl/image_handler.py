@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 import urllib.parse
@@ -211,7 +212,10 @@ class ImageHandler:
             return None
 
     async def fetch_images_from_event(
-        self, event: AstrMessageEvent, include_at_avatars: bool = False
+        self,
+        event: AstrMessageEvent,
+        include_at_avatars: bool = False,
+        reference_message_ids: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
         """
         综合提取事件中的图片：当前消息、引用消息及手动@用户头像
@@ -232,6 +236,84 @@ class ImageHandler:
             message_chain = event.get_messages()
         except Exception:
             message_chain = getattr(event.message_obj, "message", []) or []
+
+        expected_history_images = None
+        # Resolve explicitly selected historical images within this conversation.
+        if reference_message_ids:
+            if (
+                not isinstance(reference_message_ids, list)
+                or not 1 <= len(reference_message_ids) <= max_images
+                or any(
+                    isinstance(v, bool)
+                    or not isinstance(v, (str, int))
+                    or not re.fullmatch(r"-?\d{1,20}", str(v))
+                    for v in reference_message_ids
+                )
+            ):
+                raise ValueError("reference_message_unavailable")
+            bot = getattr(event, "bot", None)
+            if event.get_platform_name() != "aiocqhttp" or bot is None:
+                raise ValueError("reference_message_unavailable")
+            selected = []
+            for message_id in dict.fromkeys(int(v) for v in reference_message_ids):
+                try:
+                    data = await asyncio.wait_for(
+                        bot.call_action(action="get_msg", message_id=message_id),
+                        timeout=5,
+                    )
+                    if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                        data = data["data"]
+                    if not isinstance(data, dict) or str(
+                        data.get("message_id", "")
+                    ) != str(message_id):
+                        raise ValueError
+                    group = str(event.get_group_id() or "")
+                    if group:
+                        if str(data.get("group_id", "")) != group:
+                            raise ValueError
+                    else:
+                        if data.get("message_type") == "group" or data.get("group_id"):
+                            raise ValueError
+                        sender = str(
+                            (data.get("sender") or {}).get(
+                                "user_id", data.get("user_id", "")
+                            )
+                        )
+                        own = str(event.get_self_id() or "")
+                        if sender != str(event.get_sender_id()) and not (
+                            own
+                            and sender == own
+                            and str(data.get("target_id", ""))
+                            == str(event.get_sender_id())
+                        ):
+                            raise ValueError
+                    raw_chain = data.get("message")
+                    if not isinstance(raw_chain, list):
+                        raise ValueError
+                    images = []
+                    for item in raw_chain[:100]:
+                        if not isinstance(item, dict) or item.get("type") != "image":
+                            continue
+                        fields = item.get("data") or {}
+                        if not isinstance(fields, dict):
+                            continue
+                        url, file = fields.get("url"), fields.get("file")
+                        if isinstance(url, str) or isinstance(file, str):
+                            images.append(
+                                Image(
+                                    url=url if isinstance(url, str) else "",
+                                    file=file if isinstance(file, str) else "",
+                                )
+                            )
+                    if not images or len(selected) + len(images) > max_images:
+                        raise ValueError
+                    selected.extend(images)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    raise ValueError("reference_message_unavailable") from None
+            expected_history_images = len(selected)
+            message_chain = selected + [c for c in message_chain if isinstance(c, At)]
 
         if not message_chain:
             return message_images, avatar_images
@@ -496,6 +578,11 @@ class ImageHandler:
         else:
             logger.info("未收集到有效参考图片，若需参考图可直接发送图片或检查网络权限")
 
+        if (
+            expected_history_images is not None
+            and len(message_images) != expected_history_images
+        ):
+            raise ValueError("reference_message_unavailable")
         return message_images, avatar_images
 
     @staticmethod

@@ -108,6 +108,12 @@ astrbot_plugin_gemini_image_generation/
 
 `tl/` 目录接口索引见：[tl 模块接口说明](https://github.com/piexian/astrbot_plugin_gemini_image_generation/blob/master/tl/README.md)。
 
+## LLM 工具的历史参考图
+
+单图生成工具可通过 `reference_message_ids` 读取当前 QQ 群或私聊中指定消息的图片。消息 ID 应来自当前上下文或聊天记录搜索工具（若已安装），不能使用 QQ 号、群号或图片描述代替。此功能使用 OneBot 的只读 `get_msg`，会核对消息 ID 和会话来源，最多收集 6 张图片；指定历史消息后，不混入当前消息中未选中的图片。
+
+已有缓存图片仍可通过 `reference_image_paths` 提供。设置 `use_reference_images=true` 只读取当前及引用消息，不会自动搜索历史。所需参考图缺失、跨会话、失效或读取失败时，工具会在消耗生成额度前停止；请引用或重发图片，避免意外退化成纯文字生成。
+
 ## 贡献
 
 欢迎提交 [Issue](https://github.com/piexian/astrbot_plugin_gemini_image_generation/issues) 和 [Pull Request](https://github.com/piexian/astrbot_plugin_gemini_image_generation/pulls)。
